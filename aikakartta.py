@@ -65,17 +65,17 @@ def parse_gedcom(file_path):
 
 @st.cache_data
 def get_coordinates(places_list):
-    geolocator = Nominatim(user_agent="aikakartta_v11_final")
+    # User-agent on pakollinen
+    geolocator = Nominatim(user_agent="aikakartta_v12_safe")
     coords = {}
     total = len(places_list)
     
     status_text = st.empty()
     my_bar = st.progress(0)
     
-    # Arvioitu kesto
+    # Lasketaan arvioitu aika
     arvio = total * 1.1
     minuutit = int(arvio / 60)
     sekunnit = int(arvio % 60)
-    aika_str = f"{minuutit} min {sekunnit} sek"
     
-    status_text.write(f"Haetaan koordinaatteja {total} paikk
+    # Jaetaan teksti osiin virheiden välttäm
