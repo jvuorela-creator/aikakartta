@@ -32,9 +32,20 @@ def parse_gedcom(file_path):
     # Avataan gedcom ged4py-kirjastolla
     try:
         with GedcomReader(file_path) as parser:
-            for i, (indi_id, indi) in enumerate(parser.records0("INDI")):
-                name_parts = indi.name
-                full_name = f"{name_parts.given} {name_parts.surname}".strip()
+            # KORJAUS: Iteroidaan suoraan objekteja, ei (id, obj) -pareja
+            for indi in parser.records0("INDI"):
+                
+                # Varmistetaan, että nimi löytyy
+                if not indi.name:
+                    continue
+
+                # Ged4py:n tapa hakea nimen osat
+                try:
+                    given = indi.name.given if indi.name.given else ""
+                    surname = indi.name.surname if indi.name.surname else ""
+                    full_name = f"{given} {surname}".strip()
+                except:
+                    full_name = "Tuntematon"
                 
                 # Etsitään syntymätapahtuma (BIRT)
                 birt = indi.sub_tag("BIRT")
@@ -43,19 +54,19 @@ def parse_gedcom(file_path):
                     place_val = birt.sub_tag_value("PLAC")
                     
                     if place_val:
-                        # Yritetään kaivaa vuosiluku (olettaen että se on viimeinen nelinumeroinen luku)
+                        # Yritetään kaivaa vuosiluku
                         year = None
                         if date_val:
                             import re
                             years = re.findall(r'\d{4}', str(date_val))
                             if years:
-                                year = int(years[-1]) # Otetaan viimeinen vuosiluku
+                                year = int(years[-1]) 
                         
                         data.append({
                             "Nimi": full_name,
-                            "Vuosi": year if year else 0, # 0 jos ei vuotta, jotta lajittelu toimii
-                            "Alkuperäinen_Pvm": date_val,
-                            "Paikka": place_val
+                            "Vuosi": year if year else 0,
+                            "Alkuperäinen_Pvm": str(date_val), # Varmistetaan string-muoto
+                            "Paikka": str(place_val)           # Varmistetaan string-muoto
                         })
     except Exception as e:
         st.error(f"Virhe tiedoston lukemisessa: {e}")
