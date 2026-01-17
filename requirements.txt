@@ -1,0 +1,7 @@
+streamlit
+pandas
+ged4py
+geopy
+folium
+streamlit-folium
+chardet
