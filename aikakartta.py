@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import tempfile
 import os
-import datetime
 import re
 from ged4py.parser import GedcomReader
 from geopy.geocoders import Nominatim
@@ -15,13 +14,13 @@ import chardet
 # --- Asetukset ---
 st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
 
-st.title("📍 Sukututkimuskartta: Syntymäpaikat")
+st.title("📍 Sukututkimuskartta: Aikajana")
 st.markdown("""
-Tämä sovellus animoi sukupuun syntymäpaikat kartalle.
-Pisteet ilmestyvät kartalle aikajärjestyksessä.
+Tämä sovellus animoi suvun liikkeet kartalla.
+**Huom:** Animaatio etenee historiasta nykypäivään (Vanhin -> Uusin), jotta vuosiluvut näkyvät oikein aikajanalla.
 """)
 
-# --- Alustetaan session_state ---
+# --- Session State ---
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
 if 'current_file' not in st.session_state:
@@ -72,7 +71,8 @@ def parse_gedcom(file_path):
 
 @st.cache_data
 def get_coordinates(places_list):
-    geolocator = Nominatim(user_agent="sukututkimus_kartta_app_v5")
+    # Käytetään uniikkia user_agentia
+    geolocator = Nominatim(user_agent="sukututkimus_kartta_app_final")
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.1)
     
     coords = {}
@@ -106,12 +106,15 @@ def get_coordinates(places_list):
 def create_geojson_features(df):
     features = []
     for _, row in df.iterrows():
+        # Muutetaan vuosi aikaleimaksi. 
+        # TimestampedGeoJson vaatii ISO-formaatin.
         time_str = f"{row['Vuosi']}-01-01"
+        
         feature = {
             'type': 'Feature',
             'geometry': {
                 'type': 'Point',
-                'coordinates': [row['lon'], row['lat']],
+                'coordinates': [row['lon'], row['lat']], # GeoJSON on Lon, Lat
             },
             'properties': {
                 'time': time_str,
@@ -121,9 +124,9 @@ def create_geojson_features(df):
                     'fillColor': 'blue',
                     'fillOpacity': 0.8,
                     'stroke': 'false',
-                    'radius': 6
+                    'radius': 5
                 },
-                'popup': f"{row['Nimi']} ({row['Vuosi']})<br>{row['Paikka']}",
+                'popup': f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}",
             }
         }
         features.append(feature)
@@ -134,36 +137,29 @@ def create_geojson_features(df):
 uploaded_file = st.file_uploader("Lataa GEDCOM-tiedosto (.ged)", type=["ged"])
 
 if uploaded_file is not None:
-    # Tarkistetaan onko tiedosto vaihtunut. TÄMÄ ON NYT KORJATTU.
     if st.session_state.current_file != uploaded_file.name:
         st.session_state.processed_data = None
         st.session_state.current_file = uploaded_file.name
 
-    # Analysointinappi
     if st.button("Hae koordinaatit ja luo animaatio"):
         
-        # Luetaan tiedosto tavuina
         raw_data = uploaded_file.read()
-        
-        # Kirjoitetaan väliaikaistiedostoon
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ged") as tmp_file:
             tmp_file.write(raw_data)
             tmp_file_path = tmp_file.name
 
-        with st.spinner("Luetaan sukupuuta..."):
+        with st.spinner("Luetaan ja jäsennetään dataa..."):
             parsed_data = parse_gedcom(tmp_file_path)
         
-        # Siivotaan
         if os.path.exists(tmp_file_path):
             os.remove(tmp_file_path)
 
         if not parsed_data:
-            st.warning("Tiedostosta ei löytynyt sopivia tietoja.")
+            st.warning("Ei luettavaa dataa.")
         else:
             df = pd.DataFrame(parsed_data)
             unique_places = df['Paikka'].unique().tolist()
             
-            # Haetaan koordinaatit
             coords_dict = get_coordinates(unique_places)
             
             df['lat'] = df['Paikka'].map(lambda x: coords_dict.get(x, (None, None))[0])
@@ -174,35 +170,40 @@ if uploaded_file is not None:
             if df_clean.empty:
                 st.error("Ei koordinaatteja.")
             else:
-                # Tallennetaan valmis data sessioon
+                # Tallennetaan sessioon
                 st.session_state.processed_data = df_clean
 
-# --- Näytetään tulokset ---
+# --- Tulostus (Tapahtuu aina jos dataa on) ---
 
 if st.session_state.processed_data is not None:
-    df_display = st.session_state.processed_data.sort_values(by='Vuosi', ascending=False)
+    # Järjestetään Vanhin -> Uusin animaatiota varten
+    df_display = st.session_state.processed_data.sort_values(by='Vuosi', ascending=True)
     
-    st.success(f"Kartta luotu! Näytetään {len(df_display)} tapahtumaa.")
+    st.success(f"Valmis! Kartalla {len(df_display)} tapahtumaa.")
 
-    # Kartta
-    m = folium.Map(location=[64.0, 26.0], zoom_start=5)
+    # Lasketaan kartan keskipiste datan perusteella
+    avg_lat = df_display['lat'].mean()
+    avg_lon = df_display['lon'].mean()
+    
+    m = folium.Map(location=[avg_lat, avg_lon], zoom_start=5)
     
     features = create_geojson_features(df_display)
     
     TimestampedGeoJson(
         {'type': 'FeatureCollection', 'features': features},
-        period='P1Y',
+        period='P1Y',           # Askel: 1 vuosi
+        duration='P1000Y',      # Kesto: 1000 vuotta (eli piste jää näkyviin pysyvästi)
         add_last_point=True,
         auto_play=True,
-        loop=False,
+        loop=False,             # Ei luuppaa
         max_speed=10,
         loop_button=True,
         date_options='YYYY',
-        time_slider_drag_update=True,
-        duration='P100Y'
+        time_slider_drag_update=True
     ).add_to(m)
 
     st_folium(m, width=1000, height=800)
     
-    st.subheader("Löydetyt ja paikannetut tiedot")
+    st.subheader("Syntymäpaikat aikajärjestyksessä")
+    # Näytetään taulukossa data
     st.dataframe(df_display[['Vuosi', 'Nimi', 'Paikka']])
