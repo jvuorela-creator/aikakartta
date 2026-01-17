@@ -16,6 +16,7 @@ import chardet
 st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
 
 st.title("📍 Sukututkimuskartta: Aikajana")
+st.markdown("Pisteet ilmestyvät kartalle syntymävuoden mukaan ja jäävät näkyviin.")
 
 # --- 2. Session State ---
 if 'processed_data' not in st.session_state:
@@ -25,20 +26,13 @@ if 'current_file' not in st.session_state:
 
 # --- 3. Apufunktiot ---
 
-def detect_encoding(file_bytes):
-    """Tunnistaa tiedoston merkistön."""
-    result = chardet.detect(file_bytes)
-    return result['encoding']
-
 def parse_gedcom(file_path):
-    """Lukee GEDCOM-tiedoston."""
     data = []
     try:
         with GedcomReader(file_path) as parser:
             for indi in parser.records0("INDI"):
                 if not indi.name:
                     continue
-
                 try:
                     given = indi.name.given if indi.name.given else ""
                     surname = indi.name.surname if indi.name.surname else ""
@@ -71,29 +65,22 @@ def parse_gedcom(file_path):
 
 @st.cache_data
 def get_coordinates(places_list):
-    """Hakee koordinaatit."""
-    geolocator = Nominatim(user_agent="sukututkimus_final_v9")
+    geolocator = Nominatim(user_agent="aikakartta_fix_v10")
     coords = {}
     total = len(places_list)
     
     status_text = st.empty()
     my_bar = st.progress(0)
     
-    # Lasketaan aika selkeästi
     arvio = total * 1.1
-    minuutit = int(arvio / 60)
-    sekunnit = int(arvio % 60)
-    aika_str = f"{minuutit} min {sekunnit} sek"
-
-    status_text.write(f"Haetaan koordinaatteja {total} paikkakunnalle... Arvioitu kesto: {aika_str}.")
+    aika_str = f"{int(arvio/60)} min {int(arvio%60)} sek"
+    status_text.write(f"Haetaan koordinaatteja {total} paikkakunnalle... Arvio: {aika_str}.")
 
     for i, place in enumerate(places_list):
         clean_place = place.split(',')[0]
-        
         try:
             time.sleep(1.1) 
             location = geolocator.geocode(place, timeout=10)
-            
             if location:
                 coords[place] = (location.latitude, location.longitude)
             else:
@@ -109,42 +96,36 @@ def get_coordinates(places_list):
         my_bar.progress(int((i + 1) / total * 100))
         status_text.write(f"Käsitellään: {place} ({i+1}/{total})")
     
-    status_text.success("Koordinaatit haettu!")
+    status_text.success("Valmis!")
     time.sleep(1)
     status_text.empty()
     my_bar.empty()
     return coords
 
 def create_geojson_features(df):
-    """Luo GeoJSON-datan. Yksinkertaistettu rakenne virheiden välttämiseksi."""
     features = []
     for _, row in df.iterrows():
+        # TimestampedGeoJson vaatii tarkan päivämäärämuodon
         time_str = f"{row['Vuosi']}-01-01"
-        popup_txt = f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}"
         
-        # Määritellään tyylit erikseen selkeyden vuoksi
-        icon_style = {
-            'fillColor': 'blue',
-            'fillOpacity': 0.8,
-            'stroke': 'false',
-            'radius': 5
-        }
-        
-        props = {
-            'time': time_str,
-            'style': {'color': 'blue'},
-            'icon': 'circle',
-            'iconstyle': icon_style,
-            'popup': popup_txt
-        }
-
         feature = {
             'type': 'Feature',
             'geometry': {
                 'type': 'Point',
-                'coordinates': [row['lon'], row['lat']], 
+                'coordinates': [row['lon'], row['lat']],
             },
-            'properties': props
+            'properties': {
+                'time': time_str,
+                # Tärkeää: Icon-tyylit määritellään tässä
+                'icon': 'circle',
+                'iconstyle': {
+                    'fillColor': 'blue',
+                    'fillOpacity': 0.8,
+                    'stroke': 'false',
+                    'radius': 6
+                },
+                'popup': f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}",
+            }
         }
         features.append(feature)
     return features
@@ -155,9 +136,7 @@ col1, col2 = st.columns([1, 2])
 
 with col1:
     uploaded_file = st.file_uploader("1. Lataa GEDCOM", type=["ged"])
-    
     st.write("---")
-    st.write("### Asetukset")
     test_mode = st.checkbox("⚡ Pikatesti (vain 15 paikkaa)", value=True)
     run_btn = st.button("2. Luo kartta")
 
@@ -172,20 +151,17 @@ if uploaded_file is not None:
             tmp_file.write(raw_data)
             tmp_file_path = tmp_file.name
 
-        with st.spinner("Luetaan tietoja..."):
+        with st.spinner("Luetaan dataa..."):
             parsed_data = parse_gedcom(tmp_file_path)
-        
-        if os.path.exists(tmp_file_path):
-            os.remove(tmp_file_path)
+        os.remove(tmp_file_path)
 
         if not parsed_data:
-            st.error("Ei luettavia tietoja.")
+            st.error("Ei tietoja.")
         else:
             df = pd.DataFrame(parsed_data)
             unique_places = df['Paikka'].unique().tolist()
             
             if test_mode:
-                st.warning(f"Pikatesti: {len(unique_places)} paikasta käsitellään vain 15.")
                 unique_places = unique_places[:15]
             
             coords_dict = get_coordinates(unique_places)
@@ -207,20 +183,21 @@ if uploaded_file is not None:
 
 with col2:
     if st.session_state.processed_data is not None:
-        # Järjestys: Vanhin ensin
         df_display = st.session_state.processed_data.sort_values(by='Vuosi', ascending=True)
         
-        st.success(f"Valmis! Kartalla {len(df_display)} tapahtumaa.")
-
-        m = folium.Map(location=[64.0, 26.0], zoom_start=5)
+        # 1. Luodaan peruskartta
+        avg_lat = df_display['lat'].mean()
+        avg_lon = df_display['lon'].mean()
+        m = folium.Map(location=[avg_lat, avg_lon], zoom_start=5)
         
+        # 2. Luodaan animaatio-objekti
         features = create_geojson_features(df_display)
         
         TimestampedGeoJson(
             {'type': 'FeatureCollection', 'features': features},
-            period='P1Y',
-            duration='P1000Y',
-            add_last_point=True,
+            period='P1Y',       # Aikajana liikkuu vuosi kerrallaan
+            duration='P500Y',   # Piste pysyy kartalla 500 vuotta (eli käytännössä aina)
+            transition_time=200, # Pehmeä siirtymä (ms)
             auto_play=True,
             loop=False,
             max_speed=10,
@@ -229,7 +206,4 @@ with col2:
             time_slider_drag_update=True
         ).add_to(m)
 
-        st_folium(m, width="100%", height=600)
-        
-        with st.expander("Näytä datataulukko"):
-            st.dataframe(df_display[['Vuosi', 'Nimi', 'Paikka']])
+        st.success(f"Kartta valmis! ({len(df_display)} tapahtuma
