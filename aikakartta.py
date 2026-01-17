@@ -16,7 +16,7 @@ import chardet
 st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
 
 st.title("📍 Sukututkimuskartta: Aikajana")
-st.markdown("Pisteet ilmestyvät kartalle syntymävuoden mukaan ja jäävät näkyviin.")
+st.markdown("1. Lataa GEDCOM-tiedosto. \n2. Paina 'Luo kartta'. \n3. Pisteet ilmestyvät kartalle aikajärjestyksessä.")
 
 # --- 2. Session State ---
 if 'processed_data' not in st.session_state:
@@ -65,17 +65,50 @@ def parse_gedcom(file_path):
 
 @st.cache_data
 def get_coordinates(places_list):
-    # User-agent on pakollinen
-    geolocator = Nominatim(user_agent="aikakartta_v12_safe")
+    geolocator = Nominatim(user_agent="aikakartta_v14_simple")
     coords = {}
     total = len(places_list)
     
     status_text = st.empty()
     my_bar = st.progress(0)
     
-    # Lasketaan arvioitu aika
     arvio = total * 1.1
     minuutit = int(arvio / 60)
     sekunnit = int(arvio % 60)
     
-    # Jaetaan teksti osiin virheiden välttäm
+    # Jaetaan teksti osiin
+    msg = f"Haetaan koordinaatteja {total} paikkakunnalle. Arvio: {minuutit} min {sekunnit} sek."
+    status_text.write(msg)
+
+    for i, place in enumerate(places_list):
+        clean_place = place.split(',')[0]
+        try:
+            time.sleep(1.1) 
+            location = geolocator.geocode(place, timeout=10)
+            if location:
+                coords[place] = (location.latitude, location.longitude)
+            else:
+                location = geolocator.geocode(clean_place, timeout=10)
+                if location:
+                     coords[place] = (location.latitude, location.longitude)
+                else:
+                    coords[place] = (None, None)
+        except:
+            time.sleep(2)
+            coords[place] = (None, None)
+            
+        prosentti = int((i + 1) / total * 100)
+        if prosentti > 100: prosentti = 100
+        my_bar.progress(prosentti)
+        
+        status_text.write(f"Käsitellään: {place} ({i+1}/{total})")
+    
+    status_text.success("Valmis!")
+    time.sleep(1)
+    status_text.empty()
+    my_bar.empty()
+    return coords
+
+def create_geojson_features(df):
+    features = []
+    for _, row
