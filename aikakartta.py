@@ -11,8 +11,8 @@ from folium.plugins import TimestampedGeoJson
 from streamlit_folium import st_folium
 
 # --- 1. ASETUKSET ---
-st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
-st.title("Sukututkimuskartta")
+st.set_page_config(page_title="Sukututkimuskartta Diagnostiikka", layout="wide")
+st.title("Sukututkimuskartta: Diagnostiikka")
 
 CACHE_FILE = "tallennetut_paikat.csv"
 
@@ -57,25 +57,31 @@ def parse_gedcom(file_path):
                     place_val = birt.sub_tag_value("PLAC")
                     
                     if place_val and date_val:
-                        years = re.findall(r'\d{4}', str(date_val))
+                        # Etsitään kaikki nelinumeroiset luvut
+                        date_str = str(date_val)
+                        years = re.findall(r'\d{4}', date_str)
+                        
                         if years:
+                            # Otetaan viimeinen vuosi (usein tarkin)
                             y = int(years[-1])
-                            # Suodatetaan selkeat virheet
-                            if 1000 < y < 2100:
-                                data_list.append({
-                                    "Nimi": full_name,
-                                    "Vuosi": y,
-                                    "Paikka": str(place_val)
-                                })
+                            
+                            # Hyväksytään vain järkevät vuodet
+                            if 1500 <= y <= 2030:
+                                item = {}
+                                item["Nimi"] = full_name
+                                item["Vuosi"] = y
+                                item["Paikka"] = str(place_val)
+                                item["Orig_Pvm"] = date_str # Debuggausta varten
+                                data_list.append(item)
     except Exception as e:
-        st.error(f"Virhe GEDCOM-luvussa: {e}")
+        st.error(f"Virhe luvussa: {e}")
         return []
     return data_list
 
 @st.cache_data
 def get_coordinates_smart(places_list):
     local_cache = load_local_cache()
-    geolocator = Nominatim(user_agent="aikakartta_final_v3")
+    geolocator = Nominatim(user_agent="aikakartta_diag_v1")
     coords = {}
     
     to_fetch = []
@@ -88,16 +94,15 @@ def get_coordinates_smart(places_list):
     if not to_fetch:
         return coords
 
-    st.info(f"Haetaan verkosta {len(to_fetch)} paikkaa...")
+    st.info(f"Haetaan verkosta {len(to_fetch)} puuttuvaa paikkaa...")
     bar = st.progress(0)
-    status = st.empty()
-
+    
     for i, place in enumerate(to_fetch):
         lat, lon = None, None
         clean_place = place.split(',')[0]
         
         try:
-            time.sleep(1.2)
+            time.sleep(1.1)
             loc = geolocator.geocode(place, timeout=10)
             if loc:
                 lat, lon = loc.latitude, loc.longitude
@@ -115,45 +120,43 @@ def get_coordinates_smart(places_list):
             coords[place] = (None, None)
             
         bar.progress(int((i + 1) / len(to_fetch) * 100))
-        status.write(f"Haetaan: {place}")
 
-    status.empty()
     bar.empty()
     return coords
 
 def create_features(df):
     features = []
     for _, row in df.iterrows():
-        # Luodaan muuttujat erikseen syntaksivirheiden välttämiseksi
-        v = row['Vuosi']
-        time_str = f"{int(v)}-01-01"
-        popup_txt = f"{v}: {row['Nimi']}, {row['Paikka']}"
+        # Luodaan päivämäärästringi varovasti
+        y = int(row['Vuosi'])
+        # Animaatio vaatii YYYY-MM-DD
+        time_str = str(y) + "-01-01"
         
-        # Määritellään tyylit erikseen sanakirjoina
-        # TÄMÄ ESTÄÄ RIVIN KATKEAMISVIRHEET
-        icon_style_dict = {}
-        icon_style_dict['fillColor'] = 'blue'
-        icon_style_dict['fillOpacity'] = 0.8
-        icon_style_dict['stroke'] = 'false'
-        icon_style_dict['radius'] = 6
-
+        popup_txt = str(y) + ": " + row['Nimi'] + " (" + row['Paikka'] + ")"
+        
+        # Rakennetaan sanakirjat erikseen (ei sisäkkäin)
+        icon_style = {}
+        icon_style['fillColor'] = 'blue'
+        icon_style['fillOpacity'] = 0.8
+        icon_style['stroke'] = 'false'
+        icon_style['radius'] = 6
+        
         props = {}
         props['time'] = time_str
         props['popup'] = popup_txt
         props['icon'] = 'circle'
-        props['iconstyle'] = icon_style_dict
-        props['style'] = {'color': 'blue'}
-
-        geometry = {}
-        geometry['type'] = 'Point'
-        geometry['coordinates'] = [row['lon'], row['lat']]
-
-        feature = {}
-        feature['type'] = 'Feature'
-        feature['geometry'] = geometry
-        feature['properties'] = props
+        props['iconstyle'] = icon_style
         
-        features.append(feature)
+        geom = {}
+        geom['type'] = 'Point'
+        geom['coordinates'] = [row['lon'], row['lat']]
+        
+        feat = {}
+        feat['type'] = 'Feature'
+        feat['geometry'] = geom
+        feat['properties'] = props
+        
+        features.append(feat)
     return features
 
 # --- 3. PÄÄOHJELMA ---
@@ -164,7 +167,7 @@ if 'current_file' not in st.session_state:
     st.session_state.current_file = None
 
 uploaded_file = st.file_uploader("Lataa GEDCOM", type=["ged"])
-run_btn = st.button("Luo kartta")
+run_btn = st.button("Analysoi ja Piirrä")
 
 if uploaded_file and run_btn:
     if st.session_state.current_file != uploaded_file.name:
@@ -181,9 +184,23 @@ if uploaded_file and run_btn:
     os.remove(tf_path)
 
     if not data:
-        st.error("Ei dataa. Tarkista tiedosto.")
+        st.error("Ei dataa. Onko tiedosto oikea GEDCOM?")
     else:
         df = pd.DataFrame(data)
+        
+        # --- DIAGNOSTIIKKA TULOSTUS ---
+        st.write("---")
+        st.subheader("Datan tarkistus")
+        min_y = df['Vuosi'].min()
+        max_y = df['Vuosi'].max()
+        count = len(df)
+        st.metric(label="Löydetyt henkilöt", value=count)
+        st.metric(label="Aikaväli", value=f"{min_y} - {max_y}")
+        
+        # Jos aikaväli on outo (esim 1654-1655), näytetään varoitus
+        if max_y - min_y < 2:
+            st.error("VAROITUS: Aikaväli on liian lyhyt animaatiolle! Tarkista alla oleva taulukko.")
+            st.dataframe(df)
         
         places = df['Paikka'].unique().tolist()
         coords_map = get_coordinates_smart(places)
@@ -201,12 +218,11 @@ if uploaded_file and run_btn:
 # --- 4. TULOSTUS ---
 
 if st.session_state.processed_data is not None:
-    # Järjestys on kriittinen animaatiolle
     final_df = st.session_state.processed_data.sort_values(by='Vuosi', ascending=True)
     
-    st.success(f"Valmis! {len(final_df)} tapahtumaa.")
-    st.info("Käynnistä animaatio kartan vasemmasta alakulmasta (Play-nappi).")
+    st.subheader("Kartta")
     
+    # Keskitetään kartta
     m = folium.Map(location=[64.0, 26.0], zoom_start=5)
     
     feats = create_features(final_df)
@@ -214,17 +230,14 @@ if st.session_state.processed_data is not None:
     TimestampedGeoJson(
         {'type': 'FeatureCollection', 'features': feats},
         period='P1Y',
-        duration='P500Y', 
+        duration='P100Y', # Kesto 100v (turvallisempi kuin 500v)
         add_last_point=False,
         auto_play=True,
         loop=False,
-        max_speed=10,
+        max_speed=5,      # Hitaampi nopeus
         loop_button=True,
         date_options='YYYY',
         time_slider_drag_update=True
     ).add_to(m)
 
     st_folium(m, width=900, height=600)
-    
-    with st.expander("Näytä data"):
-        st.dataframe(final_df[['Vuosi', 'Nimi', 'Paikka']])
