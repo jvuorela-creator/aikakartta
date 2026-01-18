@@ -3,167 +3,233 @@ import pandas as pd
 import tempfile
 import os
 import re
-from ged4py.parser import GedcomReader
-import folium
-from folium.plugins import TimestampedGeoJson
-from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
 import time
+# Tuodaan kirjastot try-except lohkon sisällä
+try:
+    from ged4py.parser import GedcomReader
+    from geopy.geocoders import Nominatim
+    import folium
+    from folium.plugins import TimestampedGeoJson
+    from streamlit_folium import st_folium
+except ImportError:
+    st.error("Jokin kirjasto puuttuu.")
+    st.stop()
 
 # --- ASETUKSET ---
-st.set_page_config(page_title="Päivämäärä-testeri", layout="wide")
-st.title("🕵️ Sukututkimuskartta: Päivämäärä-testeri")
-
-st.markdown("""
-**Ongelman syy:** Ohjelma todennäköisesti hylkää suurimman osan päivämääristä, koska ne ovat erikoisessa muodossa.
-Tämä työkalu näyttää listan kaikista luetuista riveistä, jotta näemme miltä päivämäärät näyttävät.
-""")
+st.set_page_config(page_title="Sukututkimus Debugger", layout="wide")
+st.title("Sukututkimus Debugger")
+st.write("Tämä työkalu näyttää miksi päivämäärät eivät toimi.")
 
 # --- APUFUNKTIOT ---
 
-def parse_gedcom_debug(file_path):
-    # Tallennetaan kaikki löydökset, myös epäonnistuneet
+def parse_gedcom_simple(file_path):
+    # Tallennetaan tulokset tähän listaan
     results = []
     
     try:
+        # Avataan tiedosto
         with GedcomReader(file_path) as parser:
-            # Käydään läpi INDI (henkilöt)
+            # Käydään läpi henkilöt
             for indi in parser.records0("INDI"):
                 
-                # Nimi
+                # Nimen haku varovasti
                 full_name = "Tuntematon"
                 try:
                     if indi.name:
                         g = indi.name.given or ""
                         s = indi.name.surname or ""
-                        full_name = (g + " " + s).strip()
+                        full_name = str(g) + " " + str(s)
                 except:
                     pass
 
-                # Syntymä
+                # Haetaan syntymätiedot
                 birt = indi.sub_tag("BIRT")
                 if birt:
                     date_val = birt.sub_tag_value("DATE")
                     place_val = birt.sub_tag_value("PLAC")
                     
-                    # Muutetaan stringiksi varmuuden vuoksi
-                    raw_date = str(date_val) if date_val else ""
-                    raw_place = str(place_val) if place_val else ""
+                    # Muutetaan tekstiksi
+                    raw_date = str(date_val)
+                    if date_val is None:
+                        raw_date = ""
+                        
+                    raw_place = str(place_val)
+                    if place_val is None:
+                        raw_place = ""
                     
-                    # Yritetään etsiä vuosiluku
+                    # Yritetään löytää vuosiluku (4 numeroa)
                     found_year = 0
                     years = re.findall(r'\d{4}', raw_date)
+                    
                     if years:
+                        # Otetaan viimeinen löydetty luku
                         found_year = int(years[-1])
                     
-                    # Tallennetaan debug-tieto
-                    item = {
-                        "Nimi": full_name,
-                        "Raaka_Pvm": raw_date,   # Tämä on se mitä GEDCOMissa lukee oikeasti
-                        "Tulkittu_Vuosi": found_year,
-                        "Paikka": raw_place,
-                        "Status": "OK" if (found_year > 0 and raw_place != "") else "HYLÄTTY"
-                    }
+                    # Määritellään tila
+                    status = "HYLÄTTY"
+                    if found_year > 0:
+                        status = "OK"
+                    if raw_place == "":
+                        status = "EI PAIKKAA"
+
+                    # Lisätään listaan
+                    item = {}
+                    item["Nimi"] = full_name
+                    item["Raaka_Pvm"] = raw_date
+                    item["Tulkittu_Vuosi"] = found_year
+                    item["Paikka"] = raw_place
+                    item["Status"] = status
+                    
                     results.append(item)
                     
     except Exception as e:
-        st.error("Virhe tiedoston luvussa: " + str(e))
+        st.error("Virhe: " + str(e))
         return []
         
     return results
 
-@st.cache_data
-def get_coords_simple(places):
-    # Yksinkertainen geokoodaus ilman välimuistia tässä testissä
-    geolocator = Nominatim(user_agent="aikakartta_debug_run")
-    coords = {}
-    
-    # Otetaan vain 10 ensimmäistä uniikkia paikkaa testiksi, ettei mene jumiin
-    test_places = places[:10]
-    
-    if len(places) > 0:
-        st.info("Haetaan koordinaatteja vain 10 ensimmäiselle paikalle testiksi...")
-    
-    for p in test_places:
-        try:
-            time.sleep(1.1)
-            loc = geolocator.geocode(p, timeout=5)
-            if loc:
-                coords[p] = (loc.latitude, loc.longitude)
-        except:
-            pass
-    return coords
-
-def create_features(df):
-    feats = []
-    for _, row in df.iterrows():
+def create_map_features(df):
+    features = []
+    for index, row in df.iterrows():
         y = row['Tulkittu_Vuosi']
+        
+        # Aikaleima
         time_str = str(y) + "-01-01"
-        popup = str(y) + ": " + row['Nimi']
         
-        # Tyylit erikseen
-        istyle = {
-            'fillColor': 'blue',
-            'fillOpacity': 0.8,
-            'stroke': 'false',
-            'radius': 6
-        }
+        # Popup teksti
+        popup_text = str(y) + ": " + str(row['Nimi'])
         
-        props = {
-            'time': time_str,
-            'popup': popup,
-            'icon': 'circle',
-            'iconstyle': istyle,
-            'style': {'color': 'blue'}
-        }
+        # Tyylit
+        style_opts = {}
+        style_opts['fillColor'] = 'blue'
+        style_opts['fillOpacity'] = 0.8
+        style_opts['radius'] = 6
+        style_opts['stroke'] = 'false'
         
-        geo = {
-            'type': 'Point',
-            'coordinates': [row['lon'], row['lat']]
-        }
+        # GeoJSON properties
+        props = {}
+        props['time'] = time_str
+        props['popup'] = popup_text
+        props['icon'] = 'circle'
+        props['iconstyle'] = style_opts
         
-        f = {
-            'type': 'Feature',
-            'geometry': geo,
-            'properties': props
-        }
-        feats.append(f)
-    return feats
+        # GeoJSON geometry
+        geom = {}
+        geom['type'] = 'Point'
+        geom['coordinates'] = [row['lon'], row['lat']]
+        
+        # Koko feature
+        feat = {}
+        feat['type'] = 'Feature'
+        feat['geometry'] = geom
+        feat['properties'] = props
+        
+        features.append(feat)
+        
+    return features
 
 # --- PÄÄOHJELMA ---
 
 uploaded = st.file_uploader("Lataa GEDCOM", type=["ged"])
-btn = st.button("Analysoi tiedosto")
+btn = st.button("Analysoi")
 
 if uploaded and btn:
-    # 1. Lue tiedosto
-    bytes_data = uploaded.read()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".ged") as tf:
-        tf.write(bytes_data)
-        tf_path = tf.name
+    # 1. Tallennetaan tiedosto levylle
+    raw_bytes = uploaded.read()
+    
+    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".ged")
+    tf.write(raw_bytes)
+    tf.close()
+    
+    tf_path = tf.name
     
     # 2. Parsitaan
-    data = parse_gedcom_debug(tf_path)
-    os.remove(tf_path)
+    data = parse_gedcom_simple(tf_path)
     
+    # Poistetaan väliaikaistiedosto
+    if os.path.exists(tf_path):
+        os.remove(tf_path)
+    
+    # 3. Näytetään tulokset
     if not data:
-        st.error("Ei dataa löytynyt.")
+        st.error("Ei dataa.")
     else:
         df = pd.DataFrame(data)
         
-        # 3. NÄYTETÄÄN TAULUKKO (TÄMÄ ON TÄRKEIN KOHTA)
-        st.subheader("Analyysin tulos")
+        # --- DIAGNOSTIIKKA ---
+        st.subheader("Analyysi")
+        
+        # Lasketaan määrät
+        ok_mask = df['Status'] == 'OK'
+        ok_df = df[ok_mask]
+        
+        fail_mask = df['Status'] == 'HYLÄTTY'
+        fail_df = df[fail_mask]
         
         col1, col2 = st.columns(2)
-        with col1:
-            ok_count = len(df[df['Status'] == 'OK'])
-            fail_count = len(df[df['Status'] == 'HYLÄTTY'])
-            st.metric("Kelvolliset rivit", ok_count)
-            st.metric("Hylätyt rivit", fail_count)
         
+        with col1:
+            st.info("Onnistuneet rivit: " + str(len(ok_df)))
+            if not ok_df.empty:
+                st.dataframe(ok_df.head(10))
+                
         with col2:
-            st.write("Esimerkki hylätyistä riveistä (Miksi nämä eivät toimi?):")
-            st.dataframe(df[df['Status'] == 'HYLÄTTY'].head(10))
+            st.error("Hylätyt rivit: " + str(len(fail_df)))
+            st.write("Tässä näet miksi päivämäärät eivät kelpaa:")
+            if not fail_df.empty:
+                # Näytetään vain relevantit sarakkeet
+                show_cols = ['Raaka_Pvm', 'Paikka', 'Nimi']
+                st.dataframe(fail_df[show_cols].head(10))
 
-        st.write("Esimerkki hyväksytyistä riveistä:")
-        st.dataframe(df[df['Status'] == 'OK'].head(
+        # --- KARTTA TESTI ---
+        # Piirretään kartta vain jos on onnistuneita rivejä
+        if not ok_df.empty:
+            st.write("---")
+            st.subheader("Testikartta (10 ensimmäistä)")
+            
+            # Otetaan vain 10 ensimmäistä testiin
+            test_set = ok_df.head(10).copy()
+            places = test_set['Paikka'].unique().tolist()
+            
+            # Haetaan koordinaatit
+            geolocator = Nominatim(user_agent="aikakartta_debug_safe")
+            coords = {}
+            
+            st.write("Haetaan koordinaatteja...")
+            
+            for p in places:
+                try:
+                    time.sleep(1.1)
+                    loc = geolocator.geocode(p, timeout=5)
+                    if loc:
+                        coords[p] = (loc.latitude, loc.longitude)
+                except:
+                    pass
+            
+            # Mapataan
+            test_set['lat'] = test_set['Paikka'].map(lambda x: coords.get(x, (None, None))[0])
+            test_set['lon'] = test_set['Paikka'].map(lambda x: coords.get(x, (None, None))[1])
+            
+            # Poistetaan tyhjät
+            map_df = test_set.dropna(subset=['lat', 'lon'])
+            
+            if not map_df.empty:
+                # Lajitellaan
+                map_df = map_df.sort_values(by='Tulkittu_Vuosi')
+                
+                # Kartta
+                m = folium.Map(location=[64, 26], zoom_start=4)
+                
+                features = create_map_features(map_df)
+                
+                TimestampedGeoJson(
+                    {'type': 'FeatureCollection', 'features': features},
+                    period='P1Y',
+                    duration='P100Y',
+                    auto_play=True,
+                    loop=False
+                ).add_to(m)
+                
+                st_folium(m, width=800, height=500)
+            else:
+                st.warning("Koordinaatteja ei löytynyt testiryhmälle.")
