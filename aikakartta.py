@@ -12,7 +12,7 @@ from streamlit_folium import st_folium
 
 # --- 1. ASETUKSET ---
 st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
-st.title("Sukututkimuskartta: Korjattu Animaatio")
+st.title("Sukututkimuskartta")
 
 CACHE_FILE = "tallennetut_paikat.csv"
 
@@ -31,8 +31,11 @@ def load_local_cache():
     return {}
 
 def save_to_cache(place, lat, lon):
-    with open(CACHE_FILE, "a", encoding="utf-8") as f:
-        f.write(f'"{place}",{lat},{lon}\n')
+    try:
+        with open(CACHE_FILE, "a", encoding="utf-8") as f:
+            f.write(f'"{place}",{lat},{lon}\n')
+    except:
+        pass
 
 def parse_gedcom(file_path):
     data_list = []
@@ -54,12 +57,10 @@ def parse_gedcom(file_path):
                     place_val = birt.sub_tag_value("PLAC")
                     
                     if place_val and date_val:
-                        # Etsitään kaikki 4-numeroiset luvut
                         years = re.findall(r'\d{4}', str(date_val))
                         if years:
-                            # Otetaan viimeinen (usein tarkin vuosi)
                             y = int(years[-1])
-                            # Suodatetaan epärealistiset vuodet pois
+                            # Suodatetaan selkeat virheet
                             if 1000 < y < 2100:
                                 data_list.append({
                                     "Nimi": full_name,
@@ -74,7 +75,7 @@ def parse_gedcom(file_path):
 @st.cache_data
 def get_coordinates_smart(places_list):
     local_cache = load_local_cache()
-    geolocator = Nominatim(user_agent="aikakartta_final_fix_v2")
+    geolocator = Nominatim(user_agent="aikakartta_final_v3")
     coords = {}
     
     to_fetch = []
@@ -87,7 +88,7 @@ def get_coordinates_smart(places_list):
     if not to_fetch:
         return coords
 
-    st.info(f"Haetaan verkosta {len(to_fetch)} puuttuvaa paikkaa...")
+    st.info(f"Haetaan verkosta {len(to_fetch)} paikkaa...")
     bar = st.progress(0)
     status = st.empty()
 
@@ -123,23 +124,107 @@ def get_coordinates_smart(places_list):
 def create_features(df):
     features = []
     for _, row in df.iterrows():
-        # PAKOTETAAN AIKA STR-MUOTOON 'YYYY-MM-DD'
-        # Tämä on kriittisin kohta animaation toimivuudelle
-        time_str = f"{int(row['Vuosi'])}-01-01"
+        # Luodaan muuttujat erikseen syntaksivirheiden välttämiseksi
+        v = row['Vuosi']
+        time_str = f"{int(v)}-01-01"
+        popup_txt = f"{v}: {row['Nimi']}, {row['Paikka']}"
         
-        popup_txt = f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}"
+        # Määritellään tyylit erikseen sanakirjoina
+        # TÄMÄ ESTÄÄ RIVIN KATKEAMISVIRHEET
+        icon_style_dict = {}
+        icon_style_dict['fillColor'] = 'blue'
+        icon_style_dict['fillOpacity'] = 0.8
+        icon_style_dict['stroke'] = 'false'
+        icon_style_dict['radius'] = 6
+
+        props = {}
+        props['time'] = time_str
+        props['popup'] = popup_txt
+        props['icon'] = 'circle'
+        props['iconstyle'] = icon_style_dict
+        props['style'] = {'color': 'blue'}
+
+        geometry = {}
+        geometry['type'] = 'Point'
+        geometry['coordinates'] = [row['lon'], row['lat']]
+
+        feature = {}
+        feature['type'] = 'Feature'
+        feature['geometry'] = geometry
+        feature['properties'] = props
         
-        feat = {
-            'type': 'Feature',
-            'geometry': {
-                'type': 'Point',
-                'coordinates': [row['lon'], row['lat']],
-            },
-            'properties': {
-                'time': time_str, # Tämän pitää olla string, ei number
-                'popup': popup_txt,
-                'icon': 'circle',
-                'iconstyle': {
-                    'fillColor': 'blue',
-                    'fillOpacity': 0.8,
-                    'stroke
+        features.append(feature)
+    return features
+
+# --- 3. PÄÄOHJELMA ---
+
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
+if 'current_file' not in st.session_state:
+    st.session_state.current_file = None
+
+uploaded_file = st.file_uploader("Lataa GEDCOM", type=["ged"])
+run_btn = st.button("Luo kartta")
+
+if uploaded_file and run_btn:
+    if st.session_state.current_file != uploaded_file.name:
+        st.session_state.processed_data = None
+        st.session_state.current_file = uploaded_file.name
+
+    bytes_data = uploaded_file.read()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ged") as tf:
+        tf.write(bytes_data)
+        tf_path = tf.name
+
+    with st.spinner("Luetaan dataa..."):
+        data = parse_gedcom(tf_path)
+    os.remove(tf_path)
+
+    if not data:
+        st.error("Ei dataa. Tarkista tiedosto.")
+    else:
+        df = pd.DataFrame(data)
+        
+        places = df['Paikka'].unique().tolist()
+        coords_map = get_coordinates_smart(places)
+        
+        df['lat'] = df['Paikka'].map(lambda x: coords_map.get(x, (None, None))[0])
+        df['lon'] = df['Paikka'].map(lambda x: coords_map.get(x, (None, None))[1])
+        
+        df_clean = df.dropna(subset=['lat', 'lon']).copy()
+        
+        if df_clean.empty:
+            st.error("Ei koordinaatteja.")
+        else:
+            st.session_state.processed_data = df_clean
+
+# --- 4. TULOSTUS ---
+
+if st.session_state.processed_data is not None:
+    # Järjestys on kriittinen animaatiolle
+    final_df = st.session_state.processed_data.sort_values(by='Vuosi', ascending=True)
+    
+    st.success(f"Valmis! {len(final_df)} tapahtumaa.")
+    st.info("Käynnistä animaatio kartan vasemmasta alakulmasta (Play-nappi).")
+    
+    m = folium.Map(location=[64.0, 26.0], zoom_start=5)
+    
+    feats = create_features(final_df)
+    
+    TimestampedGeoJson(
+        {'type': 'FeatureCollection', 'features': feats},
+        period='P1Y',
+        duration='P500Y', 
+        add_last_point=False,
+        auto_play=True,
+        loop=False,
+        max_speed=10,
+        loop_button=True,
+        date_options='YYYY',
+        time_slider_drag_update=True
+    ).add_to(m)
+
+    st_folium(m, width=900, height=600)
+    
+    with st.expander("Näytä data"):
+        st.dataframe(final_df[['Vuosi', 'Nimi', 'Paikka']])
