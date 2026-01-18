@@ -176,7 +176,7 @@ if uploaded and btn:
         places = df['Paikka'].unique().tolist()
         
         if test_mode:
-            places = places[:10]
+            places = places[:100]
             st.warning("Pikatesti: Haetaan vain 10 ensimmäistä paikkaa.")
             
         # Haetaan koordinaatit
