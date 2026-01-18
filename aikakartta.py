@@ -6,30 +6,24 @@ import re
 import time
 from ged4py.parser import GedcomReader
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
 import folium
 from folium.plugins import TimestampedGeoJson
 from streamlit_folium import st_folium
 
-# --- ASETUKSET ---
-st.set_page_config(page_title="Sukututkimuskartta Pro", layout="wide")
-st.title("Sukututkimuskartta: Älykäs versio")
-st.markdown("""
-Tämä versio tallentaa haetut koordinaatit tiedostoon (`tallennetut_paikat.csv`).
-Ensimmäinen ajo on hidas, mutta seuraavat ovat nopeita, koska tietoja ei tarvitse hakea uudelleen.
-""")
+# --- 1. ASETUKSET ---
+st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
+st.title("Sukututkimuskartta: Toimiva animaatio")
 
+# Välimuistitiedoston nimi
 CACHE_FILE = "tallennetut_paikat.csv"
 
-# --- APUFUNKTIOT ---
+# --- 2. APUFUNKTIOT ---
 
 def load_local_cache():
-    """Lataa tallennetut koordinaatit CSV-tiedostosta muistiin."""
+    """Lataa vanhat koordinaatit levyltä, jotta vältetään IP-estot."""
     if os.path.exists(CACHE_FILE):
         try:
-            # Luetaan CSV: Sarake 0 = Paikka, Sarake 1 = Lat, Sarake 2 = Lon
             df = pd.read_csv(CACHE_FILE, header=None, names=["Paikka", "Lat", "Lon"])
-            # Muutetaan sanakirjaksi: {"Turku": (60.45, 22.25)}
             cache = {}
             for _, row in df.iterrows():
                 cache[row['Paikka']] = (row['Lat'], row['Lon'])
@@ -39,8 +33,7 @@ def load_local_cache():
     return {}
 
 def save_to_cache(place, lat, lon):
-    """Lisää uuden paikan CSV-tiedostoon."""
-    # Avataan tiedosto append-tilassa ('a'), jotta vanhat eivät katoa
+    """Tallentaa uuden koordinaatin levylle."""
     with open(CACHE_FILE, "a", encoding="utf-8") as f:
         f.write(f'"{place}",{lat},{lon}\n')
 
@@ -72,25 +65,17 @@ def parse_gedcom(file_path):
                                 "Paikka": str(place_val)
                             })
     except Exception as e:
-        st.error(f"Virhe luvussa: {e}")
+        st.error(f"Virhe GEDCOM-luvussa: {e}")
         return []
     return data_list
 
 @st.cache_data
 def get_coordinates_smart(places_list):
-    # 1. Ladataan vanhat muistista
     local_cache = load_local_cache()
-    
-    # Alustetaan geokoodaaja
-    geolocator = Nominatim(user_agent="aikakartta_pro_v1")
+    geolocator = Nominatim(user_agent="aikakartta_fixed_anim_v1")
     coords = {}
     
-    # UI
-    status = st.empty()
-    bar = st.progress(0)
-    total = len(places_list)
-    
-    # Logiikka: Erotellaan ne, jotka on jo haettu, ja ne jotka pitää hakea
+    # Erotellaan haettavat
     to_fetch = []
     for p in places_list:
         if p in local_cache:
@@ -99,19 +84,18 @@ def get_coordinates_smart(places_list):
             to_fetch.append(p)
             
     if not to_fetch:
-        status.success("Kaikki paikat löytyivät välimuistista! Ei tarvita verkkohakua.")
-        bar.progress(100)
         return coords
 
-    st.info(f"Löytyi {len(coords)} paikkaa muistista. Haetaan verkosta {len(to_fetch)} uutta paikkaa...")
+    st.info(f"Haetaan verkosta {len(to_fetch)} puuttuvaa paikkaa...")
+    bar = st.progress(0)
+    status = st.empty()
 
-    # Haetaan vain puuttuvat
     for i, place in enumerate(to_fetch):
         lat, lon = None, None
         clean_place = place.split(',')[0]
         
         try:
-            time.sleep(1.2) # Hidastus
+            time.sleep(1.2)
             loc = geolocator.geocode(place, timeout=10)
             if loc:
                 lat, lon = loc.latitude, loc.longitude
@@ -119,26 +103,18 @@ def get_coordinates_smart(places_list):
                 loc = geolocator.geocode(clean_place, timeout=10)
                 if loc:
                     lat, lon = loc.latitude, loc.longitude
-        except Exception as e:
-            if "403" in str(e) or "429" in str(e):
-                st.error("Karttapalvelu esti yhteyden. Odota hetki.")
-                break
+        except Exception:
             time.sleep(2)
         
-        # Jos löytyi, lisätään listaan JA tallennetaan tiedostoon
         if lat is not None:
             coords[place] = (lat, lon)
             save_to_cache(place, lat, lon)
         else:
             coords[place] = (None, None)
             
-        # Päivitys
-        prc = int((i + 1) / len(to_fetch) * 100)
-        bar.progress(prc)
-        status.write(f"Haetaan verkosta: {place}")
+        bar.progress(int((i + 1) / len(to_fetch) * 100))
+        status.write(f"Haetaan: {place}")
 
-    status.success("Haku valmis!")
-    time.sleep(1)
     status.empty()
     bar.empty()
     return coords
@@ -146,19 +122,25 @@ def get_coordinates_smart(places_list):
 def create_features(df):
     features = []
     for _, row in df.iterrows():
+        # Aikaleima on kriittinen animaatiolle
+        time_str = f"{row['Vuosi']}-01-01"
+        popup_txt = f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}"
+        
         feat = {
             'type': 'Feature',
             'geometry': {
                 'type': 'Point',
-                'coordinates': [row['lon'], row['lat']],
+                'coordinates': [row['lon'], row['lat']], # Lon, Lat järjestys
             },
             'properties': {
-                'time': f"{row['Vuosi']}-01-01",
-                'popup': f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}",
+                'time': time_str,
+                'popup': popup_txt,
                 'icon': 'circle',
                 'iconstyle': {
-                    'fillColor': 'blue', 'fillOpacity': 0.8,
-                    'stroke': 'false', 'radius': 6
+                    'fillColor': '#0000FF', # Sininen
+                    'fillOpacity': 0.8,
+                    'stroke': 'false',
+                    'radius': 6
                 },
                 'style': {'color': 'blue'}
             }
@@ -166,7 +148,7 @@ def create_features(df):
         features.append(feat)
     return features
 
-# --- PÄÄOHJELMA ---
+# --- 3. PÄÄOHJELMA ---
 
 if 'processed_data' not in st.session_state:
     st.session_state.processed_data = None
@@ -186,17 +168,15 @@ if uploaded_file and run_btn:
         tf.write(bytes_data)
         tf_path = tf.name
 
-    with st.spinner("Luetaan dataa..."):
+    with st.spinner("Analysoidaan..."):
         data = parse_gedcom(tf_path)
     os.remove(tf_path)
 
     if not data:
-        st.error("Ei tietoja.")
+        st.error("Ei dataa.")
     else:
         df = pd.DataFrame(data)
         places = df['Paikka'].unique().tolist()
-        
-        # Haetaan koordinaatit (käyttäen välimuistia)
         coords_map = get_coordinates_smart(places)
         
         df['lat'] = df['Paikka'].map(lambda x: coords_map.get(x, (None, None))[0])
@@ -205,20 +185,27 @@ if uploaded_file and run_btn:
         df_clean = df.dropna(subset=['lat', 'lon']).copy()
         
         if df_clean.empty:
-            st.warning("Ei koordinaatteja. Jos IP on estetty, kokeile myöhemmin uudestaan.")
+            st.error("Ei koordinaatteja. (IP-esto voi olla päällä)")
         else:
             st.session_state.processed_data = df_clean
+
+# --- 4. TULOSTUS JA ANIMAATIO ---
 
 if st.session_state.processed_data is not None:
     final_df = st.session_state.processed_data.sort_values(by='Vuosi', ascending=True)
     
-    m = folium.Map(location=[final_df['lat'].mean(), final_df['lon'].mean()], zoom_start=5)
+    st.success(f"Valmis! {len(final_df)} pistettä.")
+    st.info("Paina kartan vasemmassa alakulmassa olevaa 'Play'-nappia.")
+    
+    m = folium.Map(location=[64.0, 26.0], zoom_start=5)
+    
+    features = create_features(final_df)
     
     TimestampedGeoJson(
-        {'type': 'FeatureCollection', 'features': create_features(final_df)},
-        period='P1Y',
-        duration='P500Y',
-        transition_time=200,
+        {'type': 'FeatureCollection', 'features': features},
+        period='P1Y',        # 1 vuosi kerrallaan
+        duration='P500Y',    # Piste jää näkyviin (500 vuotta)
+        add_last_point=False, # TÄMÄ ON TÄRKEÄ: Estää viivojen piirtymisen pisteiden välille
         auto_play=True,
         loop=False,
         max_speed=10,
@@ -227,7 +214,6 @@ if st.session_state.processed_data is not None:
         time_slider_drag_update=True
     ).add_to(m)
 
-    st.success(f"Valmis! {len(final_df)} pistettä.")
     st_folium(m, width=900, height=600)
     
     with st.expander("Näytä data"):
