@@ -12,15 +12,13 @@ from streamlit_folium import st_folium
 
 # --- 1. ASETUKSET ---
 st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
-st.title("Sukututkimuskartta: Toimiva animaatio")
+st.title("Sukututkimuskartta: Korjattu Animaatio")
 
-# Välimuistitiedoston nimi
 CACHE_FILE = "tallennetut_paikat.csv"
 
 # --- 2. APUFUNKTIOT ---
 
 def load_local_cache():
-    """Lataa vanhat koordinaatit levyltä, jotta vältetään IP-estot."""
     if os.path.exists(CACHE_FILE):
         try:
             df = pd.read_csv(CACHE_FILE, header=None, names=["Paikka", "Lat", "Lon"])
@@ -33,7 +31,6 @@ def load_local_cache():
     return {}
 
 def save_to_cache(place, lat, lon):
-    """Tallentaa uuden koordinaatin levylle."""
     with open(CACHE_FILE, "a", encoding="utf-8") as f:
         f.write(f'"{place}",{lat},{lon}\n')
 
@@ -57,13 +54,18 @@ def parse_gedcom(file_path):
                     place_val = birt.sub_tag_value("PLAC")
                     
                     if place_val and date_val:
+                        # Etsitään kaikki 4-numeroiset luvut
                         years = re.findall(r'\d{4}', str(date_val))
                         if years:
-                            data_list.append({
-                                "Nimi": full_name,
-                                "Vuosi": int(years[-1]),
-                                "Paikka": str(place_val)
-                            })
+                            # Otetaan viimeinen (usein tarkin vuosi)
+                            y = int(years[-1])
+                            # Suodatetaan epärealistiset vuodet pois
+                            if 1000 < y < 2100:
+                                data_list.append({
+                                    "Nimi": full_name,
+                                    "Vuosi": y,
+                                    "Paikka": str(place_val)
+                                })
     except Exception as e:
         st.error(f"Virhe GEDCOM-luvussa: {e}")
         return []
@@ -72,10 +74,9 @@ def parse_gedcom(file_path):
 @st.cache_data
 def get_coordinates_smart(places_list):
     local_cache = load_local_cache()
-    geolocator = Nominatim(user_agent="aikakartta_fixed_anim_v1")
+    geolocator = Nominatim(user_agent="aikakartta_final_fix_v2")
     coords = {}
     
-    # Erotellaan haettavat
     to_fetch = []
     for p in places_list:
         if p in local_cache:
@@ -122,99 +123,23 @@ def get_coordinates_smart(places_list):
 def create_features(df):
     features = []
     for _, row in df.iterrows():
-        # Aikaleima on kriittinen animaatiolle
-        time_str = f"{row['Vuosi']}-01-01"
+        # PAKOTETAAN AIKA STR-MUOTOON 'YYYY-MM-DD'
+        # Tämä on kriittisin kohta animaation toimivuudelle
+        time_str = f"{int(row['Vuosi'])}-01-01"
+        
         popup_txt = f"{row['Vuosi']}: {row['Nimi']}, {row['Paikka']}"
         
         feat = {
             'type': 'Feature',
             'geometry': {
                 'type': 'Point',
-                'coordinates': [row['lon'], row['lat']], # Lon, Lat järjestys
+                'coordinates': [row['lon'], row['lat']],
             },
             'properties': {
-                'time': time_str,
+                'time': time_str, # Tämän pitää olla string, ei number
                 'popup': popup_txt,
                 'icon': 'circle',
                 'iconstyle': {
-                    'fillColor': '#0000FF', # Sininen
+                    'fillColor': 'blue',
                     'fillOpacity': 0.8,
-                    'stroke': 'false',
-                    'radius': 6
-                },
-                'style': {'color': 'blue'}
-            }
-        }
-        features.append(feat)
-    return features
-
-# --- 3. PÄÄOHJELMA ---
-
-if 'processed_data' not in st.session_state:
-    st.session_state.processed_data = None
-if 'current_file' not in st.session_state:
-    st.session_state.current_file = None
-
-uploaded_file = st.file_uploader("Lataa GEDCOM", type=["ged"])
-run_btn = st.button("Luo kartta")
-
-if uploaded_file and run_btn:
-    if st.session_state.current_file != uploaded_file.name:
-        st.session_state.processed_data = None
-        st.session_state.current_file = uploaded_file.name
-
-    bytes_data = uploaded_file.read()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".ged") as tf:
-        tf.write(bytes_data)
-        tf_path = tf.name
-
-    with st.spinner("Analysoidaan..."):
-        data = parse_gedcom(tf_path)
-    os.remove(tf_path)
-
-    if not data:
-        st.error("Ei dataa.")
-    else:
-        df = pd.DataFrame(data)
-        places = df['Paikka'].unique().tolist()
-        coords_map = get_coordinates_smart(places)
-        
-        df['lat'] = df['Paikka'].map(lambda x: coords_map.get(x, (None, None))[0])
-        df['lon'] = df['Paikka'].map(lambda x: coords_map.get(x, (None, None))[1])
-        
-        df_clean = df.dropna(subset=['lat', 'lon']).copy()
-        
-        if df_clean.empty:
-            st.error("Ei koordinaatteja. (IP-esto voi olla päällä)")
-        else:
-            st.session_state.processed_data = df_clean
-
-# --- 4. TULOSTUS JA ANIMAATIO ---
-
-if st.session_state.processed_data is not None:
-    final_df = st.session_state.processed_data.sort_values(by='Vuosi', ascending=True)
-    
-    st.success(f"Valmis! {len(final_df)} pistettä.")
-    st.info("Paina kartan vasemmassa alakulmassa olevaa 'Play'-nappia.")
-    
-    m = folium.Map(location=[64.0, 26.0], zoom_start=5)
-    
-    features = create_features(final_df)
-    
-    TimestampedGeoJson(
-        {'type': 'FeatureCollection', 'features': features},
-        period='P1Y',        # 1 vuosi kerrallaan
-        duration='P500Y',    # Piste jää näkyviin (500 vuotta)
-        add_last_point=False, # TÄMÄ ON TÄRKEÄ: Estää viivojen piirtymisen pisteiden välille
-        auto_play=True,
-        loop=False,
-        max_speed=10,
-        loop_button=True,
-        date_options='YYYY',
-        time_slider_drag_update=True
-    ).add_to(m)
-
-    st_folium(m, width=900, height=600)
-    
-    with st.expander("Näytä data"):
-        st.dataframe(final_df[['Vuosi', 'Nimi', 'Paikka']])
+                    'stroke
