@@ -1,237 +1,153 @@
-import streamlit as st
-import pandas as pd
-import tempfile
-import os
+import matplotlib.pyplot as plt
+import collections
 import re
-import time
+import datetime
 
-# Tuodaan kirjastot turvallisesti
-try:
-    from ged4py.parser import GedcomReader
-    from geopy.geocoders import Nominatim
-    import folium
-    from folium.plugins import TimestampedGeoJson
-    from streamlit_folium import st_folium
-except ImportError:
-    st.error("Asenna puuttuvat kirjastot: pip install ged4py geopy folium streamlit-folium")
-    st.stop()
+# Luetaan GEDCOM-tiedosto
+file_path = 'sukupuu.ged.ged'
 
-# --- 1. SIVUN ASETUKSET ---
-st.set_page_config(page_title="Sukututkimuskartta", layout="wide")
-st.title("Sukututkimuskartta")
+individuals = []
+current_ind = {}
+reading_birth = False
+reading_death = False
 
-# --- 2. ALUSTETAAN MUISTI (Session State) ---
-# TAMA ESTAA KARTAN KATOAMISEN
-if 'data_ready' not in st.session_state:
-    st.session_state.data_ready = False
-if 'map_df' not in st.session_state:
-    st.session_state.map_df = None
+with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+    for line in f:
+        line = line.strip()
+        parts = line.split(' ', 2)
+        level = parts[0]
+        tag = parts[1] if len(parts) > 1 else ''
+        value = parts[2] if len(parts) > 2 else ''
 
-# --- 3. APUFUNKTIOT ---
-
-def parse_gedcom_safe(file_path):
-    results = []
-    try:
-        with GedcomReader(file_path) as parser:
-            for indi in parser.records0("INDI"):
-                if not indi.name: continue
-                
-                # Nimi
-                full_name = "Tuntematon"
-                try:
-                    g = indi.name.given or ""
-                    s = indi.name.surname or ""
-                    full_name = str(g) + " " + str(s)
-                except: pass
-
-                # Syntymä
-                birt = indi.sub_tag("BIRT")
-                if birt:
-                    date_val = birt.sub_tag_value("DATE")
-                    place_val = birt.sub_tag_value("PLAC")
-                    
-                    # Muutetaan tekstiksi
-                    raw_date = str(date_val) if date_val else ""
-                    raw_place = str(place_val) if place_val else ""
-                    
-                    # Etsitään vuosi
-                    found_year = 0
-                    years = re.findall(r'\d{4}', raw_date)
-                    if years:
-                        found_year = int(years[-1])
-                    
-                    # Hyväksytään vain jos vuosi on järkevä ja paikka löytyy
-                    if found_year > 1000 and raw_place != "":
-                        item = {}
-                        item["Nimi"] = full_name
-                        item["Vuosi"] = found_year
-                        item["Paikka"] = raw_place
-                        results.append(item)
-                        
-    except Exception as e:
-        st.error("Virhe tiedoston luvussa: " + str(e))
-        return []
-    return results
-
-def get_coordinates_safe(places):
-    geolocator = Nominatim(user_agent="aikakartta_fix_final")
-    coords = {}
-    
-    # UI
-    text_box = st.empty()
-    bar = st.progress(0)
-    total = len(places)
-    
-    text_box.write("Haetaan koordinaatteja...")
-    
-    for i, p in enumerate(places):
-        try:
-            # Hidastus on pakollinen
-            time.sleep(1.1)
-            loc = geolocator.geocode(p, timeout=5)
-            if loc:
-                coords[p] = (loc.latitude, loc.longitude)
-            else:
-                # Kokeillaan lyhyempää nimeä (ennen pilkkua)
-                short_p = p.split(',')[0]
-                loc2 = geolocator.geocode(short_p, timeout=5)
-                if loc2:
-                    coords[p] = (loc2.latitude, loc2.longitude)
-        except:
-            pass
+        if level == '0' and value == 'INDI':
+            if current_ind:
+                individuals.append(current_ind)
+            current_ind = {'name': '', 'birth_date': '', 'death_date': '', 'sex': ''}
+            reading_birth = False
+            reading_death = False
+        
+        if not current_ind:
+            continue
             
-        # Palkki
-        percent = int((i + 1) / total * 100)
-        bar.progress(percent)
-        text_box.write("Käsitellään: " + str(i+1) + "/" + str(total))
+        if level == '1' and tag == 'NAME':
+            current_ind['name'] = value.replace('/', '').strip()
         
-    text_box.success("Valmis!")
-    time.sleep(1)
-    text_box.empty()
-    bar.empty()
-    return coords
-
-def create_geojson_features(df):
-    features = []
-    for _, row in df.iterrows():
-        y = row['Vuosi']
-        time_str = str(y) + "-01-01"
-        popup = str(y) + ": " + row['Nimi'] + " (" + row['Paikka'] + ")"
-        
-        # Tyylit
-        style = {}
-        style['fillColor'] = 'blue'
-        style['fillOpacity'] = 0.8
-        style['radius'] = 5
-        style['stroke'] = 'false'
-        
-        # Ominaisuudet
-        props = {}
-        props['time'] = time_str
-        props['popup'] = popup
-        props['icon'] = 'circle'
-        props['iconstyle'] = style
-        
-        # Sijainti
-        geom = {}
-        geom['type'] = 'Point'
-        geom['coordinates'] = [row['lon'], row['lat']]
-        
-        # Feature
-        feat = {}
-        feat['type'] = 'Feature'
-        feat['geometry'] = geom
-        feat['properties'] = props
-        
-        features.append(feat)
-    return features
-
-# --- 4. KÄYTTÖLIITTYMÄ ---
-
-uploaded = st.file_uploader("1. Lataa GEDCOM", type=["ged"])
-test_mode = st.checkbox("Pikatesti (vain 10 paikkaa)", value=True)
-btn = st.button("2. Analysoi ja Piirrä")
-
-# --- 5. LOGIIKKA (Suoritetaan kun nappia painetaan) ---
-
-if uploaded and btn:
-    # Luetaan tiedosto
-    raw = uploaded.read()
-    tf = tempfile.NamedTemporaryFile(delete=False, suffix=".ged")
-    tf.write(raw)
-    tf.close()
-    
-    with st.spinner("Luetaan GEDCOM-tiedostoa..."):
-        data = parse_gedcom_safe(tf.name)
-    
-    if os.path.exists(tf.name):
-        os.remove(tf.name)
-        
-    if not data:
-        st.error("Ei tietoja löytynyt.")
-    else:
-        df = pd.DataFrame(data)
-        
-        # Otetaan uniikit paikat
-        places = df['Paikka'].unique().tolist()
-        
-        if test_mode:
-            places = places[:100]
-            st.warning("Pikatesti: Haetaan vain 10 ensimmäistä paikkaa.")
+        elif level == '1' and tag == 'SEX':
+            current_ind['sex'] = value
             
-        # Haetaan koordinaatit
-        coords = get_coordinates_safe(places)
-        
-        # Yhdistetään
-        df['lat'] = df['Paikka'].map(lambda x: coords.get(x, (None, None))[0])
-        df['lon'] = df['Paikka'].map(lambda x: coords.get(x, (None, None))[1])
-        
-        # Jos pikatesti, karsitaan data
-        if test_mode:
-            df = df[df['Paikka'].isin(coords.keys())]
+        elif level == '1' and tag == 'BIRT':
+            reading_birth = True
+            reading_death = False
             
-        # Poistetaan tyhjät
-        final_df = df.dropna(subset=['lat', 'lon']).copy()
+        elif level == '1' and tag == 'DEAT':
+            reading_death = True
+            reading_birth = False
+            
+        elif level == '2' and tag == 'DATE':
+            if reading_birth:
+                current_ind['birth_date'] = value
+            elif reading_death:
+                current_ind['death_date'] = value
+
+    if current_ind:
+        individuals.append(current_ind)
+
+# --- Datan käsittely ---
+
+first_names = []
+birth_months = []
+lifespans = [] # (syntymävuosi, ikä)
+
+months_map = {
+    'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+    'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+}
+
+def extract_year(date_str):
+    match = re.search(r'\d{4}', date_str)
+    if match:
+        return int(match.group(0))
+    return None
+
+def extract_month(date_str):
+    for m_str, m_int in months_map.items():
+        if m_str in date_str.upper():
+            return m_int
+    return None
+
+for ind in individuals:
+    # 1. Nimet
+    full_name = ind.get('name', '')
+    if full_name:
+        parts = full_name.split()
+        if parts:
+            first_names.append(parts[0]) # Otetaan ensimmäinen nimi
+            
+    # 2. Kuukaudet
+    b_date = ind.get('birth_date', '')
+    if b_date:
+        m = extract_month(b_date)
+        if m:
+            birth_months.append(m)
+            
+    # 3. Elinikä
+    d_date = ind.get('death_date', '')
+    if b_date and d_date:
+        b_year = extract_year(b_date)
+        d_year = extract_year(d_date)
+        if b_year and d_year and d_year > b_year:
+            age = d_year - b_year
+            if age < 110: # Suodatetaan virheelliset datat
+                lifespans.append((b_year, age))
+
+# --- Grafiikka 1: Suosituimmat etunimet ---
+name_counts = collections.Counter(first_names).most_common(10)
+names, counts = zip(*name_counts) if name_counts else ([], [])
+
+plt.figure(figsize=(10, 6))
+plt.barh(names[::-1], counts[::-1], color='#69b3a2')
+plt.title('Suvun 10 suosituinta etunimeä', fontsize=16)
+plt.xlabel('Lukumäärä')
+plt.grid(axis='x', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.savefig('grafiikka1_nimet.png')
+plt.close()
+
+# --- Grafiikka 2: Syntymäkuukaudet ---
+month_counts = collections.Counter(birth_months)
+sorted_months = [month_counts.get(i, 0) for i in range(1, 13)]
+month_names = ['Tammi', 'Helmi', 'Maalis', 'Huhti', 'Touko', 'Kesä', 
+               'Heinä', 'Elo', 'Syys', 'Loka', 'Marras', 'Joulu']
+
+plt.figure(figsize=(10, 6))
+colors = plt.cm.viridis([i/12 for i in range(12)])
+plt.bar(month_names, sorted_months, color=colors)
+plt.title('Missä kuussa sukuun synnytään?', fontsize=16)
+plt.ylabel('Syntyneiden määrä')
+plt.xticks(rotation=45)
+plt.grid(axis='y', linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.savefig('grafiikka2_kuukaudet.png')
+plt.close()
+
+# --- Grafiikka 3: Elinikä ja historia ---
+if lifespans:
+    b_years, ages = zip(*lifespans)
+    plt.figure(figsize=(10, 6))
+    plt.scatter(b_years, ages, alpha=0.6, c=ages, cmap='coolwarm', edgecolors='grey')
+    plt.title('Elinikä syntymävuoden mukaan', fontsize=16)
+    plt.xlabel('Syntymävuosi')
+    plt.ylabel('Ikä kuollessa')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    
+    # Trendiviiva (yksinkertainen)
+    if len(b_years) > 1:
+        import numpy as np
+        z = np.polyfit(b_years, ages, 1)
+        p = np.poly1d(z)
+        plt.plot(b_years, p(b_years), "r--", label='Trendi')
+        plt.legend()
         
-        if final_df.empty:
-            st.error("Ei koordinaatteja löytynyt.")
-        else:
-            # TALLENNETAAN MUISTIIN (TÄMÄ ON KORJAUS VILKKUMISEEN)
-            st.session_state.map_df = final_df.sort_values(by='Vuosi')
-            st.session_state.data_ready = True
-
-# --- 6. KARTAN PIIRTO (Tämä on napin ulkopuolella!) ---
-
-if st.session_state.data_ready and st.session_state.map_df is not None:
-    st.write("---")
-    df_show = st.session_state.map_df
-    
-    st.success("Kartta valmis! " + str(len(df_show)) + " kohdetta.")
-    st.info("Paina Play-nappia kartan vasemmassa alakulmassa.")
-    
-    # Kartta
-    start_lat = df_show['lat'].mean()
-    start_lon = df_show['lon'].mean()
-    m = folium.Map(location=[start_lat, start_lon], zoom_start=5)
-    
-    # Luodaan animaatio
-    feats = create_geojson_features(df_show)
-    
-    TimestampedGeoJson(
-        {'type': 'FeatureCollection', 'features': feats},
-        period='P1Y',
-        duration='P100Y',
-        auto_play=True,
-        loop=False,
-        max_speed=10,
-        loop_button=True,
-        date_options='YYYY',
-        time_slider_drag_update=True
-    ).add_to(m)
-    
-    # Piirretään Streamlitiin
-    st_folium(m, width=900, height=600)
-    
-    # Taulukko
-    with st.expander("Näytä data"):
-        st.dataframe(df_show[['Vuosi', 'Nimi', 'Paikka']])
+    plt.tight_layout()
+    plt.savefig('grafiikka3_elinika.png')
+    plt.close()
