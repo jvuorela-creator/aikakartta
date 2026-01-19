@@ -8,7 +8,7 @@ import numpy as np
 st.title("Sukupuun tilastot")
 
 # Määritellään tiedostonimi (varmista että tiedosto on samassa kansiossa tai lataa se GitHubiin)
-file_path = 'sukupuu.ged.ged'
+file_path = 'sukupuu.ged'
 
 # Tarkistetaan löytyykö tiedosto, jotta sovellus ei kaadu
 try:
